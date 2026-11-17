@@ -469,7 +469,7 @@ async function runUpstream(route, body, onEvent) {
   }, p, 'openai-inbound ' + route.model);
   if (!upstream.ok) {
     const text = await upstream.text();
-    const err = new Error('upstream ' + upstream.status + ': ' + text.slice(0, 200));
+    const err = new Error(explainUpstream(upstream.status, text, p));
     err.status = upstream.status;
     throw err;
   }
@@ -498,6 +498,21 @@ function abortOnClose(req, res) {
 function anthropicError(res, status, type, message) {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ type: 'error', error: { type, message } }));
+}
+
+// A 401 can mean a bad key or a rejected client (AgentRouter: "unauthorized client detected");
+// say which it is, so nobody re-enters a key that was fine.
+function explainUpstream(status, text, p) {
+  const body = String(text || '').slice(0, 600);
+  const clientRejected = /unauthorized client|client detected|client not allowed|invalid client/i.test(body);
+  const sent = Object.keys(p.headers || {});
+  if (status === 401 && clientRejected) {
+    return sent.length
+      ? 'upstream 401: the gateway rejected this client even though its identity headers (' + sent.join(', ') + ') were sent. The key may need approval on the provider side. Reply: ' + body
+      : 'upstream 401: the gateway rejected this client and none of its required identity headers are saved for this provider. Run: modelmesh doctor --fix (or re-add the provider) to restore them. Reply: ' + body;
+  }
+  if (status === 401) return 'upstream 401: the provider rejected the key. Check it with: modelmesh keys. Reply: ' + body;
+  return 'upstream ' + status + ': ' + body;
 }
 
 async function proxyAnthropic(res, route, body, req) {
@@ -531,6 +546,10 @@ async function proxyAnthropic(res, route, body, req) {
   if (!upstream.ok) logFailure('upstream', route.name, route.model, upstream.status, text);
   if (upstream.status === 429 || upstream.status === 503) recordQuota(route.name, route.model, upstream.status, text);
   abort.cleanup();
+  // The provider's own error JSON passes through untouched, except the fingerprint case,
+  // where the body alone never hints that identity headers are missing.
+  if (!upstream.ok && upstream.status === 401 && /unauthorized client|client detected|client not allowed|invalid client/i.test(text))
+    return anthropicError(res, 401, 'authentication_error', explainUpstream(401, text, p));
   res.writeHead(upstream.status, { 'content-type': 'application/json' });
   res.end(text);
 }
@@ -570,7 +589,7 @@ async function proxyOpenAI(res, route, body) {
     // Pass the real status through: a 403 (key cap / permission) must not look like a
     // retryable 5xx, otherwise Claude Code retries it ten times.
     const type = upstream.status === 401 ? 'authentication_error' : upstream.status === 403 ? 'permission_error' : upstream.status === 429 ? 'rate_limit_error' : 'api_error';
-    return anthropicError(res, upstream.status, type, 'upstream ' + upstream.status + ': ' + t.slice(0, 600));
+    return anthropicError(res, upstream.status, type, explainUpstream(upstream.status, t, p));
   }
   if (!body.stream) {
     const j = await upstream.json();
@@ -636,7 +655,7 @@ async function proxyResponses(res, route, body) {
       return proxyOpenAI(res, route, body);
     }
     const type = upstream.status === 401 ? 'authentication_error' : upstream.status === 403 ? 'permission_error' : upstream.status === 429 ? 'rate_limit_error' : 'api_error';
-    return anthropicError(res, upstream.status, type, 'upstream ' + upstream.status + ': ' + t.slice(0, 600));
+    return anthropicError(res, upstream.status, type, explainUpstream(upstream.status, t, p));
   }
   if (!body.stream) {
     const j = await upstream.json();

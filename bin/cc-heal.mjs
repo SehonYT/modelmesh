@@ -146,6 +146,26 @@ export function healEnvironment({ root, home = os.homedir(), prefix, killGateway
         if (cfg.override.model && chosen && cfg.override.model !== chosen) { cfg.override.model = chosen; dirty = true; changes.push("config: override model -> " + chosen); }
       }
     }
+    // A provider saved before its preset gained client headers gets 401 "unauthorized client
+    // detected"; re-apply the preset's identity by baseUrl, filling only missing fields.
+    try {
+      const presets = loadJson(path.join(root, "presets.json"), null);
+      for (const preset of (presets && presets.free) || []) {
+        if (!preset.baseUrl || !(preset.headers || preset.api || preset.pathResponses)) continue;
+        for (const [name, p] of visible()) {
+          if (String(p.baseUrl || "").replace(/\/$/, "") !== String(preset.baseUrl).replace(/\/$/, "")) continue;
+          const filled = [];
+          if (preset.headers) {
+            const have = p.headers || {};
+            const missing = Object.keys(preset.headers).filter((k) => have[k] === undefined);
+            if (missing.length) { p.headers = { ...preset.headers, ...have }; filled.push("headers"); }
+          }
+          if (preset.api && !p.api) { p.api = preset.api; filled.push("api"); }
+          if (preset.pathResponses && !p.pathResponses) { p.pathResponses = preset.pathResponses; filled.push("pathResponses"); }
+          if (filled.length) { dirty = true; changes.push("config: " + name + " restored preset " + filled.join(", ")); }
+        }
+      }
+    } catch (e) { }
     const routing = {};
     for (const [name, p] of visible()) {
       for (const id of Object.keys(p.modelsById || {})) {

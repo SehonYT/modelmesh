@@ -417,6 +417,11 @@ function addProvider(c, name, opts) {
     aliases: opts.aliases, modelsById,
   };
   if (opts.noKey) p.noKey = true;
+  // A fingerprinting gateway (AgentRouter: "unauthorized client detected") needs these on every
+  // request, and the gateway reads them only from the saved provider, so persist them here.
+  if (opts.headers && Object.keys(opts.headers).length) p.headers = { ...opts.headers };
+  if (opts.api) p.api = opts.api;
+  if (opts.pathResponses) p.pathResponses = opts.pathResponses;
   // Remember which tier list this provider was built from, so a refresh can keep it.
   if (opts.tier) p.tier = opts.tier;
   c.providers[name] = p;
@@ -647,6 +652,7 @@ async function presetFlow(c, presetOverride) {
     key, models, main: main.id, contextWindow: main.contextTokens || 128000,
     aliases: { opus: main.id, sonnet: main.id, haiku: main.id, subagent: main.id },
     noKey: !!(preset.noKey || preset.local), tier,
+    headers: preset.headers, api: preset.api, pathResponses: preset.pathResponses,
   });
   if (tier) console.log(dim("  " + (tier === "free" ? "free tier only - no credits spent" : tier === "paid" ? "paid models only" : "free and paid models")));
   summary(c2, name);
@@ -736,6 +742,7 @@ async function envMode() {
       key, models, main: main.id, contextWindow: main.contextTokens || 128000,
       aliases: { opus: main.id, sonnet: main.id, haiku: main.id, subagent: main.id },
       noKey: !!(preset.noKey || preset.local), tier,
+      headers: preset.headers, api: preset.api, pathResponses: preset.pathResponses,
     });
     summary(c, name);
     await ensureStatusLine();

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { healEnvironment } from "../bin/cc-heal.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const presets = JSON.parse(fs.readFileSync(path.join(root, "presets.json"), "utf8"));
@@ -163,4 +165,45 @@ test("the AgentRouter slug and docs match the preset", () => {
   assert.equal(p.kind, "openai");
   assert.equal(p.path, "/chat/completions");
   assert.match(p.keyUrl, /agentrouter\.org/);
+});
+
+test("preset client headers survive setup and are restored by heal", { skip: process.platform === "win32" }, () => {
+  // The gateway reads headers only from the saved provider, so setup must persist them;
+  // losing them is exactly what reintroduced the AgentRouter 401.
+  const setup = fs.readFileSync(path.join(root, "bin", "cc-setup.mjs"), "utf8");
+  assert.match(setup, /p\.headers = \{ \.\.\.opts\.headers \}/, "addProvider persists the headers");
+  const passes = setup.match(/headers: preset\.headers, api: preset\.api, pathResponses: preset\.pathResponses/g) || [];
+  assert.equal(passes.length, 2, "both preset flows pass headers, api and pathResponses");
+
+  // Heal restores them for a provider saved before the preset had them, without
+  // overwriting a header the user set on purpose.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mm-hdr-"));
+  const home = path.join(tmp, "home");
+  const inst = path.join(home, ".local", "share", "modelmesh");
+  fs.mkdirSync(path.join(inst, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".config", "modelmesh"), { recursive: true });
+  fs.copyFileSync(path.join(root, "presets.json"), path.join(inst, "presets.json"));
+  const cfgPath = path.join(home, ".config", "modelmesh", "config.json");
+  fs.writeFileSync(cfgPath, JSON.stringify({
+    active: "agentrouter",
+    providers: { agentrouter: { type: "openai", baseUrl: "https://agentrouter.org/v1", model: "gpt-6.1-sol",
+      headers: { "user-agent": "my-agent/1.0" },
+      modelsById: { "gpt-6.1-sol": { name: "GPT", contextTokens: 100000 } } } },
+    routing: {},
+  }));
+  const prevCfg = process.env.MODELMESH_CONFIG;
+  process.env.MODELMESH_CONFIG = cfgPath;
+  try {
+    healEnvironment({ root: inst, home, prefix: path.join(tmp, "prefix"), searchPath: path.join(tmp, "bin") });
+  } finally {
+    if (prevCfg === undefined) delete process.env.MODELMESH_CONFIG; else process.env.MODELMESH_CONFIG = prevCfg;
+  }
+  const p = JSON.parse(fs.readFileSync(cfgPath, "utf8")).providers.agentrouter;
+  assert.equal(p.headers["user-agent"], "my-agent/1.0", "a user-set header is kept");
+  assert.equal(p.headers.originator, "codex_cli_rs");
+  assert.equal(p.headers.codex_cli_rs, "1");
+  assert.equal(p.api, "responses");
+  assert.equal(p.pathResponses, "/v1/responses");
 });
