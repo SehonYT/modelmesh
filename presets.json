@@ -62,6 +62,63 @@
       "notes": "Google account OAuth (Antigravity / Google One AI). Requires access to Antigravity; run modelmesh antigravity login"
     },
     {
+      "id": "opencode",
+      "name": "OpenCode AI (Free Models)",
+      "kind": "opencode",
+      "auth": "opencode",
+      "baseUrl": "https://opencode.ai/inference/openai/v1",
+      "path": "/chat/completions",
+      "modelsPath": null,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash-free",
+          "name": "DeepSeek V4.1 Flash Free (Reasoning)",
+          "contextTokens": 200000
+        },
+        {
+          "id": "tidepool-alpha-free",
+          "name": "Tidepool Alpha Free",
+          "contextTokens": 200000
+        },
+        {
+          "id": "hy4-flash-free",
+          "name": "Tencent Hy4 Flash Free",
+          "contextTokens": 200000
+        },
+        {
+          "id": "flint-40b-free",
+          "name": "Flint 40B Free",
+          "contextTokens": 128000
+        },
+        {
+          "id": "iceman-free",
+          "name": "Iceman Free",
+          "contextTokens": 128000
+        },
+        {
+          "id": "nemotron-3.5-super-vl-free",
+          "name": "Nemotron 3.5 Super VL Free",
+          "contextTokens": 128000
+        },
+        {
+          "id": "mimo-v2.6-flash-free",
+          "name": "MiMo V2.6 Flash Free",
+          "contextTokens": 200000
+        },
+        {
+          "id": "beam-free",
+          "name": "Beam Free",
+          "contextTokens": 128000
+        },
+        {
+          "id": "big-pickle",
+          "name": "Big Pickle",
+          "contextTokens": 128000
+        }
+      ],
+      "notes": "OpenCode Console account OAuth (OpenCode AI). Free models with zero usage costs; run modelmesh opencode login"
+    },
+    {
       "id": "groq",
       "name": "Groq",
       "kind": "openai",

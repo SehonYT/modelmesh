@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { proxyAntigravity } from "./antigravity.mjs";
+import { proxyOpencode } from "./opencode.mjs";
 import {
   sanitizeBody,
   requestShapeError,
@@ -412,6 +413,8 @@ async function proxyOpenAIInbound(req, res, body) {
     if (route.provider.type === 'antigravity') {
       // Reuse the native handler with a sink instead of an HTTP response.
       await proxyAntigravity(null, null, route, { ...anthropicBody, stream: true }, { sink: onEvent });
+    } else if (route.provider.type === 'opencode') {
+      await proxyOpencode(null, null, route, { ...anthropicBody, stream: true }, { sink: onEvent });
     } else {
       await runUpstream(route, { ...anthropicBody, stream: true }, onEvent);
     }
@@ -496,8 +499,11 @@ function abortOnClose(req, res) {
 }
 
 function anthropicError(res, status, type, message) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ type: 'error', error: { type, message } }));
+  if (!res || res.headersSent || res.writableEnded) return;
+  try {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type, message } }));
+  } catch (e) {}
 }
 
 // A 401 can mean a bad key or a rejected client (AgentRouter: "unauthorized client detected");
@@ -682,9 +688,11 @@ async function proxyResponses(res, route, body) {
 // flight: doing so truncates the stream and the client reports a failure for a healthy turn.
 let inFlight = 0;
 
-// Match OmniRoute's listener settings: without these a slow or idle client can hold a socket
+// Listener settings: without these a slow or idle client can hold a socket
 // open indefinitely, and a half-open phone connection is never reclaimed.
 const server = http.createServer(async (req, res) => {
+  req.on('error', () => {});
+  res.on('error', () => {});
   try { req.socket.setNoDelay(true); } catch (e) { }
   // Counted so the idle check cannot shut the gateway down mid-response.
   if (req.url !== '/health') { inFlight += 1; res.on('close', () => { inFlight -= 1; }); }
@@ -805,8 +813,9 @@ const server = http.createServer(async (req, res) => {
       LOG('REQ', route.name, '->', route.model, 'stream=' + !!body.stream, 'tools=' + (body.tools || []).length);
       // Keep the status line in sync with the model Claude Code selected, for every provider
       // (Antigravity refreshes itself after the request to also pick up quota).
-      if (route.provider.type !== 'antigravity') refreshStatusLine().catch(() => { });
+      if (route.provider.type !== 'antigravity' && route.provider.type !== 'opencode') refreshStatusLine().catch(() => { });
       if (route.provider.type === 'antigravity') return await proxyAntigravity(req, res, route, body, { anthropicError });
+      if (route.provider.type === 'opencode') return await proxyOpencode(req, res, route, body, { anthropicError });
       if (route.provider.type === 'anthropic') return await proxyAnthropic(res, route, body, req);
       if (responsesApi(route.provider, route.model) === 'responses') return await proxyResponses(res, route, body);
       return await proxyOpenAI(res, route, body);

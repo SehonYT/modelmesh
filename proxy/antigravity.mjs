@@ -11,8 +11,7 @@ import path from "node:path";
 import { ensureAccessToken, loadCredentials, GENERATE_URLS, antigravityContentHeaders } from "../bin/cc-antigravity.mjs";
 import { refreshStatusLine } from "../bin/cc-statusline.mjs";
 
-// Connection pool agents with TCP keep-alive, ported from OmniRoute's Antigravity bridge
-// (bin/antigravity-bridge.mjs:28-43). Their pool is pinned rather than left to the runtime
+// Connection pool agents with TCP keep-alive. Their pool is pinned rather than left to the runtime
 // default, which is what keeps a flaky link from opening a fresh TLS handshake per request.
 const HTTP_AGENT = new http.Agent({
   keepAlive: true,
@@ -380,8 +379,7 @@ export async function proxyAntigravity(req, res, route, body, { anthropicError, 
     const m = String((e && e.message) || e);
     return code && !m.includes(code) ? m + " (" + code + ")" : m;
   };
-  // Ported from OmniRoute's forwarding branch (bin/antigravity-bridge.mjs:418-503): a plain
-  // https.request over the pinned keep-alive agent, with setNoDelay on the request. Their
+  // Plain https.request over the pinned keep-alive agent, with setNoDelay on the request. Their
   // resilience comes from the socket handling, not from retries - the bridge retries nothing.
   const sendUpstream = (accessToken, url) => new Promise((resolve, reject) => {
     let target;
@@ -395,7 +393,7 @@ export async function proxyAntigravity(req, res, route, body, { anthropicError, 
       method: "POST",
       // Ask for an uncompressed stream. node:https does NOT decode for us the way fetch did,
       // so a gzipped SSE body would decode as garbage and read as "0 events" - a silent empty
-      // response. OmniRoute makes the same demand (bin/antigravity-bridge.mjs:415).
+      // response.
       headers: { ...antigravityContentHeaders(accessToken, { accept: "text/event-stream", "accept-encoding": "identity" }), "content-length": Buffer.byteLength(payload) },
       agent: isHttps ? HTTPS_AGENT : HTTP_AGENT,
     }, (rawRes) => {
@@ -619,8 +617,7 @@ export async function proxyAntigravity(req, res, route, body, { anthropicError, 
   };
   // Silence allowance per read. A stalled link is noticed in two minutes, not never.
   const IDLE_MS = Number(process.env.MODELMESH_ANTIGRAVITY_IDLE_MS || 120000);
-  // The stall deadline is the agent's own socket-inactivity timeout, the same mechanism
-  // OmniRoute relies on (bin/antigravity-bridge.mjs:34 timeout: 120000). Verified locally: a
+  // The stall deadline is the agent's own socket-inactivity timeout (timeout: 120000). Verified locally: a
   // 4.3s stream survives a 1.5s agent timeout while data keeps flowing, so it measures silence
   // rather than total elapsed time - which is exactly what a long thinking turn needs.
   // Arm the socket's inactivity timer exactly once. Calling res.setTimeout per chunk ADDS a

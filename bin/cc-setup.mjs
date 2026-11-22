@@ -8,6 +8,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { login as antigravityLogin, ensureProject as antigravityEnsureProject, loadCredentials as antigravityCreds, fetchAvailableModels, updateProviderModels } from "./cc-antigravity.mjs";
+import { login as opencodeLogin, loadCredentials as opencodeCreds, fetchAvailableModels as fetchOpencodeModels } from "./cc-opencode.mjs";
 import { installStatusLine, refreshStatusLine } from "./cc-statusline.mjs";
 import { installRoot, configFile, claudeDir, cacheDir, atomicWrite } from "./cc-paths.mjs";
 import { fetchPlans as naraPlans, fetchNaraModels as naraModels, splitByTier as naraSplit, readNaraCache, writeNaraCache } from "./cc-nara.mjs";
@@ -449,7 +450,7 @@ function summary(c, name) {
   const p = c.providers[name];
   const total = visible(c).reduce((n, [, q]) => n + Object.keys(q.modelsById || {}).length, 0);
   const model = (p.modelsById && p.modelsById[p.model] && p.modelsById[p.model].name) || p.model || "-";
-  const keyState = (p.noKey || p.type === "antigravity") ? "not required" : ((loadKeys()[name] || p.apiKeyEnv) ? "saved" : "missing");
+  const keyState = (p.noKey || p.type === "antigravity" || p.type === "opencode") ? "not required" : ((loadKeys()[name] || p.apiKeyEnv) ? "saved" : "missing");
   console.log();
   console.log("  " + cyan("✔ Provider ready"));
   console.log("  " + dim("provider") + "  " + bold(name) + dim("  " + p.type));
@@ -521,7 +522,8 @@ async function fetchAnyModels(p, key) {
   let lastErr;
   for (const url of candidates) {
     try {
-      const r = await fetchT(url, { headers: key ? { authorization: "Bearer " + key } : {} });
+      const headers = { ...(key ? { authorization: "Bearer " + key } : {}), ...(p.headers || {}) };
+      const r = await fetchT(url, { headers });
       if (!r.ok) { lastErr = new Error(url + " HTTP " + r.status); continue; }
       const j = await r.json();
       const arr = j.data || j.models || j;
@@ -537,7 +539,7 @@ async function fetchAnyModels(p, key) {
 }
 
 async function promptProviderKey(c, name, p) {
-  if (p.noKey || p.type === "antigravity") return true;
+  if (p.noKey || p.type === "antigravity" || p.type === "opencode") return true;
   if (p.apiKeyEnv && process.env[p.apiKeyEnv]) return true;
   if (loadKeys()[name]) return true;
   console.log();
@@ -582,7 +584,7 @@ async function presetFlow(c, presetOverride) {
         const tags = [
           p.local ? "local" : "",
           p.noKey ? "no key" : "",
-          p.auth === "antigravity" ? "OAuth" : "",
+          (p.auth === "antigravity" || p.auth === "opencode") ? "OAuth" : "",
         ].filter(Boolean).join(", ");
         console.log("  " + String(start + i + 1).padStart(2) + ". " + p.name + (tags ? dim("  " + tags) : "") + dim("  " + (p.baseUrl || "")));
       });
@@ -626,6 +628,28 @@ async function presetFlow(c, presetOverride) {
     try { installStatusLine(); await refreshStatusLine({ force: true }); } catch (e) { }
     if ((await ask("\nSend a small test request now? (y/N) > ")).toLowerCase().startsWith("y")) await runSmokeTest();
     return aname;
+  }
+  if (preset.auth === "opencode") {
+    let creds = opencodeCreds();
+    if (!creds || !creds.access_token) {
+      if (!process.stdin.isTTY) { console.log(cyan("  OpenCode OAuth needs a terminal; run: modelmesh opencode login")); return null; }
+      console.log(dim("  starting OpenCode Console OAuth login..."));
+      try { creds = await opencodeLogin({ log: (m) => console.log(m) }); }
+      catch (e) { console.log(cyan("  login failed: " + e.message)); return null; }
+    }
+    let omodels = [];
+    try { omodels = await fetchOpencodeModels({ freeOnly: true }); } catch (e) {}
+    if (!omodels.length) omodels = presetStaticModels(preset);
+    const omain = await pickModel(omodels, "Main model", "deepseek-v4.1-flash-free");
+    const existingO = visible(c).find(([n, p]) => p.type === "opencode" || n === "opencode");
+    const oname = existingO ? existingO[0] : providerName(c, "opencode");
+    addProvider(c, oname, {
+      family: "opencode", type: "opencode", baseUrl: preset.baseUrl, path: preset.path,
+      key: "", noKey: true, models: omodels, main: omain.id, contextWindow: omain.contextTokens || 200000,
+      aliases: { opus: omain.id, sonnet: omain.id, haiku: omain.id, subagent: omain.id },
+    });
+    summary(c, oname);
+    return oname;
   }
   let key = "";
   if (!preset.noKey) {
@@ -683,11 +707,13 @@ function parseFlags() {
     console.log("    --type openai|anthropic");
     console.log("    --path <path>        request path override");
     console.log("    --test               send a smoke-test request after setup");
+    console.log("    --refetch            refetch models from source for all set up providers");
     console.log("");
     console.log("  Examples:");
     console.log("    modelmesh setup --preset antigravity");
     console.log("    modelmesh setup --provider custom-openai --base-url http://127.0.0.1:8080/v1 --model local-model");
     console.log("    modelmesh setup --preset groq --key gsk_... --test");
+    console.log("    modelmesh setup --refetch");
     process.exit(0);
   }
   const map = {
@@ -696,7 +722,11 @@ function parseFlags() {
     "--type": "CC_SETUP_TYPE", "--path": "CC_SETUP_PATH", "--name": "CC_SETUP_NAME", "--context": "CC_SETUP_CONTEXT",
   };
   for (const [flag, env] of Object.entries(map)) { const v = val(flag); if (v) process.env[env] = v; }
-  return { test: a.includes("--test"), hasFlags: Object.keys(map).some((f) => a.includes(f)) };
+  return {
+    test: a.includes("--test"),
+    refetch: a.includes("--refetch") || a.includes("-f"),
+    hasFlags: Object.keys(map).some((f) => a.includes(f)),
+  };
 }
 
 async function runSmokeTest() {
@@ -728,6 +758,22 @@ async function envMode() {
       summary(c0, name0);
       await ensureStatusLine();
       if (opts.test) await runSmokeTest();
+      return;
+    }
+    if (preset.auth === "opencode") {
+      let creds = opencodeCreds();
+      if (!creds) throw new Error("run: modelmesh opencode login");
+      let omodels = [];
+    try { omodels = await fetchOpencodeModels({ freeOnly: true }); } catch (e) {}
+    if (!omodels.length) omodels = presetStaticModels(preset);
+      const want = process.env.CC_SETUP_MODEL || "";
+      const main = (want && omodels.find((m) => m.id === want)) || omodels[0];
+      if (!main) throw new Error("no opencode models");
+      const c0 = loadCfg();
+      const existing = visible(c0).find(([n, p]) => p.type === "opencode" || n === "opencode");
+      const name0 = process.env.CC_SETUP_NAME || (existing ? existing[0] : providerName(c0, "opencode"));
+      addProvider(c0, name0, { family: "opencode", type: "opencode", baseUrl: preset.baseUrl, path: preset.path, key: "", noKey: true, models: omodels, main: main.id, contextWindow: main.contextTokens || 200000, aliases: { opus: main.id, sonnet: main.id, haiku: main.id, subagent: main.id } });
+      summary(c0, name0);
       return;
     }
     const c = loadCfg();
@@ -861,18 +907,24 @@ async function addFlow(c) {
   console.log("  5. Custom Anthropic-compatible  " + dim("local gateway or Anthropic endpoint"));
   console.log("  6. tokens.bd           " + dim("many models, cheap"));
   console.log("  7. Google Antigravity  " + dim("Google account OAuth - Gemini 3.8, Claude 4.6"));
+  console.log("  8. OpenCode AI         " + dim("OpenCode Console OAuth - DeepSeek V4.1, Hy4, Free models"));
   console.log();
   let kind = "";
   while (!kind) {
     const a = await ask("Provider [1] > ");
-    kind = ({ "": "openrouter", "1": "openrouter", "2": "gemini", "3": "preset", "p": "preset", "4": "custom-openai", "5": "custom-anthropic", "6": "tokens", "7": "antigravity", "a": "antigravity" })[a] || "";
+    kind = ({ "": "openrouter", "1": "openrouter", "2": "gemini", "3": "preset", "p": "preset", "4": "custom-openai", "5": "custom-anthropic", "6": "tokens", "7": "antigravity", "a": "antigravity", "8": "opencode", "o": "opencode" })[a] || "";
     if (a === "b" || a === "0") return null;
-    if (!kind) console.log(cyan("  enter 1-7 (b = back)"));
+    if (!kind) console.log(cyan("  enter 1-8 (b = back)"));
   }
   if (kind === "preset") { await presetFlow(loadCfg()); return; }
   if (kind === "antigravity") {
     const preset = (loadPresets().free || []).find((p) => p.auth === "antigravity");
     if (!preset) { console.log(cyan("  Antigravity preset missing")); return null; }
+    return await presetFlow(loadCfg(), preset);
+  }
+  if (kind === "opencode") {
+    const preset = (loadPresets().free || []).find((p) => p.auth === "opencode");
+    if (!preset) { console.log(cyan("  OpenCode preset missing")); return null; }
     return await presetFlow(loadCfg(), preset);
   }
   let base = "";
@@ -918,6 +970,98 @@ async function addFlow(c) {
   return name;
 }
 
+export async function refetchAllProviders(c) {
+  const list = visible(c);
+  if (!list.length) {
+    console.log(cyan("  No providers configured yet."));
+    return;
+  }
+  console.log();
+  console.log("  " + bold("Refetching models from source for all providers..."));
+  console.log();
+
+  const ks = loadKeys();
+  const presets = loadPresets();
+  const allPresets = (presets.free || []).concat(presets.paid || []);
+  let updatedCount = 0;
+  let totalModels = 0;
+
+  for (const [name, p] of list) {
+    process.stdout.write("  " + bold(name.padEnd(16)) + dim(String(p.type || "").padEnd(12)));
+    const key = ks[name] || (p.apiKeyEnv ? process.env[p.apiKeyEnv] : "");
+    const preset = allPresets.find((pr) => pr.id === p.preset || pr.id === name || (pr.baseUrl && pr.baseUrl === p.baseUrl));
+    const mergedP = { ...p, headers: { ...(preset && preset.headers ? preset.headers : {}), ...(p.headers || {}) } };
+
+    let freshModels = null;
+    let err = null;
+
+    try {
+      if (p.type === "antigravity" || p.auth === "antigravity") {
+        freshModels = await fetchAvailableModels({ timeoutMs: 15000 });
+      } else if (p.type === "opencode" || p.auth === "opencode") {
+        freshModels = await fetchOpencodeModels({ freeOnly: true });
+      } else if (p.family === "tokens" || /tokens\.bd/.test(p.baseUrl || "")) {
+        freshModels = await fetchTokensModels(key);
+      } else if (p.family === "nararouter" || /router\.bynara\.id/.test(p.baseUrl || "")) {
+        freshModels = await fetchNaraRouterModels(key, { tier: p.tier || "free" });
+      } else if (p.family === "openrouter" || /openrouter\.ai/.test(p.baseUrl || "")) {
+        freshModels = await fetchOpenRouterModels(key, { tier: p.tier || "free" });
+      } else if (p.family === "gemini" || /generativelanguage/.test(p.baseUrl || "")) {
+        freshModels = await fetchGeminiModels(key);
+      } else {
+        freshModels = await fetchAnyModels(mergedP, key);
+      }
+    } catch (e) {
+      err = e;
+    }
+
+    if (freshModels && freshModels.length) {
+      const oldCount = Object.keys(p.modelsById || {}).length;
+      p.modelsById = {};
+      for (const m of freshModels) {
+        p.modelsById[m.id] = {
+          name: m.name || m.id,
+          contextTokens: m.contextTokens || 0,
+          inUsd: m.inUsd ?? null,
+          outUsd: m.outUsd ?? null,
+        };
+      }
+      if (!p.modelsById[p.model]) {
+        p.model = freshModels[0].id;
+      }
+      if (p.defaultModel && !p.modelsById[p.defaultModel]) {
+        p.defaultModel = p.model;
+      }
+      if (c.override && c.override.provider === name && !p.modelsById[c.override.model]) {
+        c.override.model = p.model;
+      }
+      if (c.providers[name + "~native"]) {
+        c.providers[name + "~native"].modelsById = { ...p.modelsById };
+      }
+      p.aliases = p.aliases || {};
+      for (const k of Object.keys(p.aliases)) {
+        if (!p.modelsById[p.aliases[k]]) p.aliases[k] = p.model;
+      }
+      updatedCount++;
+      totalModels += freshModels.length;
+      console.log(color("32", "✔ ") + cyan(String(freshModels.length).padStart(3) + " models") + dim(" (was " + oldCount + ")"));
+    } else {
+      const msg = err ? errText(err) : "no models returned";
+      console.log(color("31", "✖ ") + dim(msg));
+    }
+  }
+
+  rebuild(c);
+  saveCfg(c);
+  writeSettings(c);
+  await ensureStatusLine();
+  stopGateway();
+
+  console.log();
+  console.log("  " + cyan("✔ Updated " + updatedCount + "/" + list.length + " provider(s) · " + totalModels + " total models in picker"));
+  console.log(dim("  Claude Code /model picker regenerated; gateway will restart on next request."));
+}
+
 async function ttyMode() {
   let stamp = {};
   try { stamp = JSON.parse(fs.readFileSync(path.join(ROOT, "modelmesh.json"), "utf8")); } catch (e) { }
@@ -945,7 +1089,7 @@ async function ttyMode() {
       console.log("  " + dim("#") + "  " + dim("provider".padEnd(15)) + dim("type".padEnd(12)) + dim("model"));
       list.forEach(([name, p], i) => {
         const model = (c.override && c.override.provider === name && c.override.model) ? c.override.model : (p.model || p.defaultModel || "-");
-        const key = p.type === "antigravity" ? "Google OAuth" : p.noKey ? "no key" : ((ks0[name] || p.apiKeyEnv) ? "key saved" : "no key");
+        const key = p.type === "antigravity" ? "Google OAuth" : p.type === "opencode" ? "OpenCode OAuth" : p.noKey ? "no key" : ((ks0[name] || p.apiKeyEnv) ? "key saved" : "no key");
         console.log("  " + String(i + 1).padStart(2) + (name === c.active ? color("32", " ✔ ") : "   ") + bold(name.padEnd(15)) + dim(String(p.type).padEnd(12)) + model + dim("   " + key));
       });
     } else {
@@ -953,13 +1097,17 @@ async function ttyMode() {
       console.log(dim("  No providers configured yet - let's add one."));
     }
     console.log();
-    console.log("  " + (list.length ? "number = switch provider   " : "") + "a = add provider   " + (list.length ? "r = remove   " : "") + "t = test   w = web fetch providers   s = skills   q = quit");
+    console.log("  " + (list.length ? "number = switch provider   " : "") + "a = add provider   " + (list.length ? "r = remove   " : "") + (list.length ? "f = refetch models   " : "") + "t = test   w = web fetch providers   s = skills   q = quit");
     console.log();
     const a = (await ask("Choice > ")).toLowerCase();
     if (a === "q") return;
     if (a === "t") { await runSmokeTest(); continue; }
     if (a === "w") { await webProvidersFlow(); continue; }
     if (a === "s") { await skillsFlow(); continue; }
+    if (a === "f" || a === "refetch") {
+      await refetchAllProviders(c);
+      continue;
+    }
     if (a === "a" || !list.length) {
       const added = await addFlow(c);
       if (!added) continue;
@@ -1005,6 +1153,7 @@ async function ttyMode() {
 (async () => {
   try {
     const flags = parseFlags();
+    if (flags.refetch) return await refetchAllProviders(loadCfg());
     const flagged = flags.hasFlags || flags.test || process.env.CC_SETUP_PRESET || process.env.CC_SETUP_PROVIDER || process.env.CC_SETUP_KEY;
     if (flagged || process.env.CC_SETUP_NONINTERACTIVE === "1" || !process.stdin.isTTY) return await envMode();
     return await ttyMode();

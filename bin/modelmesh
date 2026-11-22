@@ -177,6 +177,15 @@ function antigravityState() {
   } catch (e) { return { ok: false, detail: "not logged in (run: modelmesh antigravity login)" }; }
 }
 
+function opencodeState() {
+  try {
+    const f = path.join(path.dirname(CFG), "opencode.json");
+    const c = JSON.parse(fs.readFileSync(f, "utf8"));
+    if (c && c.access_token) return { ok: true, detail: "OAuth" + (c.email ? " " + c.email : "") + (c.org_name ? " · org " + c.org_name : "") };
+    return { ok: false, detail: "not logged in (run: modelmesh opencode login)" };
+  } catch (e) { return { ok: false, detail: "not logged in (run: modelmesh opencode login)" }; }
+}
+
 async function doctor(fix) {
   const c = load();
   const settingsPath = SETTINGS_PATH;
@@ -194,6 +203,9 @@ async function doctor(fix) {
   for (const [name, p] of vis) {
     if (p.type === "antigravity") {
       const st = antigravityState();
+      if (!st.ok) fail("provider " + name + ": " + st.detail); else pass("provider " + name + ": " + st.detail);
+    } else if (p.type === "opencode") {
+      const st = opencodeState();
       if (!st.ok) fail("provider " + name + ": " + st.detail); else pass("provider " + name + ": " + st.detail);
     } else if (!p.noKey && !ks[name] && !p.apiKeyEnv) {
       fail("provider " + name + " has no API key (modelmesh key " + name + " <key>)");
@@ -453,6 +465,7 @@ function resolvedClaude() {
 }
 async function checkProviderKey(name, p) {
   if (p.type === "antigravity") return antigravityState();
+  if (p.type === "opencode") return opencodeState();
   if (p.noKey) return { ok: true, detail: 'no key required' };
   const key = loadKeys()[name];
   if (!key) return { ok: false, detail: 'no key stored' };
@@ -486,7 +499,7 @@ async function diagnose() {
   else {
     const vis = Object.entries(c.providers || {}).filter(([, p]) => !p.hidden);
     const ks = loadKeys();
-    console.log("  providers " + (vis.length ? vis.map(([n, p]) => n + "(" + (p.type === "antigravity" ? "OAuth" : p.noKey ? "no key" : (ks[n] ? "key" : "no key")) + ")").join(", ") : "none"));
+    console.log("  providers " + (vis.length ? vis.map(([n, p]) => n + "(" + ((p.type === "antigravity" || p.type === "opencode") ? "OAuth" : p.noKey ? "no key" : (ks[n] ? "key" : "no key")) + ")").join(", ") : "none"));
     console.log("  active    " + (c.active || "(none)") + "  override=" + JSON.stringify(c.override || null));
   {
     const rc = resolvedClaude();
@@ -567,7 +580,8 @@ const HELP = [
   "  key <provider> <key>  store an API key",
   "  presets [--json]      built-in provider presets",
   "  sync-picker           rebuild the /model picker",
-  "  sync                  refresh context windows and prices",
+  "  sync [--all]          refresh models (or refetch from source across all providers)",
+  "  refetch               refetch models from live source for all providers",
   "",
   "Google Antigravity",
   "  antigravity login     Google OAuth login",
@@ -696,7 +710,7 @@ switch (cmd) {
       const model = (name === activeName && activeId) ? activeId : (p.model || p.defaultModel || "-");
       const isActive = name === activeName;
       const marker = isActive ? color("32", "●") : dim("○");
-      const key = p.type === "antigravity" ? "OAuth" : p.noKey ? "no key" : ((loadKeys()[name] || p.apiKeyEnv) ? "key set" : "no key");
+      const key = (p.type === "antigravity" || p.type === "opencode") ? "OAuth" : p.noKey ? "no key" : ((loadKeys()[name] || p.apiKeyEnv) ? "key set" : "no key");
       console.log("   " + marker + " " + pad(name, 15) + dim(pad(p.type, 12)) + pad(model, 32) + dim(key));
     }
     if (!Object.keys(c.providers || {}).filter((n) => !c.providers[n].hidden).length) {
@@ -736,7 +750,7 @@ switch (cmd) {
       for (const [name, p] of Object.entries(c.providers || {})) {
         if (p.hidden) continue;
         const model = (name === c.active && c.override && c.override.model) ? c.override.model : (p.model || p.defaultModel || "-");
-        const keyLabel = p.type === "antigravity" ? "OAuth" : p.noKey ? "no key" : mask(loadKeys()[name] || (p.apiKeyEnv ? "env:" + p.apiKeyEnv : ""));
+        const keyLabel = (p.type === "antigravity" || p.type === "opencode") ? "OAuth" : p.noKey ? "no key" : mask(loadKeys()[name] || (p.apiKeyEnv ? "env:" + p.apiKeyEnv : ""));
         console.log((name === c.active ? " \u2714 " : "   ") + name.padEnd(14) + String(p.type).padEnd(12) + " " + model + "  key=" + keyLabel);
         shown++;
       }
@@ -771,10 +785,14 @@ switch (cmd) {
     const c = load();
     let id = args[0];
     if (!id) { console.error("usage: modelmesh use <model-id>   (see: modelmesh models)"); process.exit(1); }
-    const cat = await catalog(false);
-    const entry = cat.models.find(m => m.id === id);
-    if (!entry) { console.error("model not found in catalog: " + id); process.exit(1); }
     const p = c.providers[c.active];
+    if (!p) { console.error("no active provider configured"); process.exit(1); }
+    let entry = (p.modelsById && p.modelsById[id]) ? { id, name: p.modelsById[id].name || id, contextTokens: p.modelsById[id].contextTokens, context: fmtCtx(p.modelsById[id].contextTokens), inUsd: p.modelsById[id].inUsd || 0, outUsd: p.modelsById[id].outUsd || 0 } : null;
+    if (!entry) {
+      const cat = await catalog(false);
+      entry = cat.models.find(m => m.id === id);
+    }
+    if (!entry) { console.error("model not found in catalog: " + id); process.exit(1); }
     p.model = entry.id;
     p.defaultModel = entry.id;
     p.contextWindow = entry.contextTokens || p.contextWindow || 128000;
@@ -791,7 +809,12 @@ switch (cmd) {
     console.log("restart Claude Code to apply.");
     break;
   }
+  case "refetch":
   case "sync": {
+    if (cmd === "refetch" || args.includes("--all") || args.includes("--source")) {
+      execFileSync(process.execPath, [path.join(ROOT, "bin", "cc-setup.mjs"), "--refetch"], { stdio: "inherit" });
+      break;
+    }
     const cat = await catalog(true);
     console.log("catalog refreshed: " + cat.models.length + " models at " + cat.fetchedAt);
     break;
@@ -1084,6 +1107,12 @@ switch (cmd) {
     if (!["login", "status", "logout", "refresh", "usage", "models"].includes(sub)) { console.log("usage: modelmesh antigravity [login|status|logout|usage|models]"); break; }
     execFileSync(process.execPath, [path.join(ROOT, "bin", "cc-antigravity.mjs"), sub === "refresh" ? "status" : sub], { stdio: "inherit" });
     if ((sub === "login" || sub === "logout" || sub === "usage") || (sub === "models" && args.includes("--update"))) refreshStatusLineFile();
+    break;
+  }
+  case "opencode": {
+    const sub = args[0] || "status";
+    if (!["login", "status", "logout", "refresh", "models"].includes(sub)) { console.log("usage: modelmesh opencode [login|status|logout|models]"); break; }
+    execFileSync(process.execPath, [path.join(ROOT, "bin", "cc-opencode.mjs"), sub === "refresh" ? "status" : sub, ...args.slice(1)], { stdio: "inherit" });
     break;
   }
   case "statusline": {
